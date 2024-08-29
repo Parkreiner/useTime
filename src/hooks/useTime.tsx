@@ -20,25 +20,31 @@ import dayjs, { Dayjs } from "dayjs";
 type IntervalMs = number;
 type SubscriptionCallback = (newTime: Dayjs) => void;
 type SetTimeout = typeof window.setTimeout;
+type ClearTimeout = typeof window.clearTimeout;
 
 type TimeManagerInit = Readonly<{
   initialTime: Dayjs;
   setTimeout?: SetTimeout;
+  clearTimeout?: ClearTimeout;
 }>;
 
 export class TimeManager {
-  readonly #setTimeout: SetTimeout;
   readonly #subscriptions: Map<IntervalMs, Set<SubscriptionCallback>>;
-  #currentTime: Dayjs;
+  readonly #setTimeout: SetTimeout;
+  readonly #clearTimeout: ClearTimeout;
+
+  #latestTime: Dayjs;
   #nextTickId: number | undefined;
   #nextTickMs: number | undefined;
 
   constructor({
     initialTime,
     setTimeout = window.setTimeout,
+    clearTimeout = window.clearTimeout,
   }: TimeManagerInit) {
-    this.#currentTime = initialTime;
+    this.#latestTime = initialTime;
     this.#setTimeout = setTimeout;
+    this.#clearTimeout = clearTimeout;
     this.#nextTickId = undefined;
     this.#nextTickMs = undefined;
     this.#subscriptions = new Map();
@@ -49,7 +55,7 @@ export class TimeManager {
   // to setTimeout
   private tick = (): void => {
     const newTime = dayjs();
-    this.#currentTime = newTime;
+    this.#latestTime = newTime;
 
     for (const subGroup of this.#subscriptions.values()) {
       for (const callback of subGroup) {
@@ -62,6 +68,8 @@ export class TimeManager {
   };
 
   private scheduleNextTick(): void {
+    this.#clearTimeout(this.#nextTickId);
+
     let earliestPossibleUpdateMs = Infinity;
     for (const interval of this.#subscriptions.keys()) {
       if (interval < earliestPossibleUpdateMs) {
@@ -82,11 +90,14 @@ export class TimeManager {
     this.#nextTickId = this.#setTimeout(this.tick, this.#nextTickMs);
   }
 
-  getCurrentTime(): Dayjs {
-    return this.#currentTime;
-  }
+  getMostRecentTimeUpdate = (): Dayjs => {
+    return this.#latestTime;
+  };
 
-  subscribe(cb: SubscriptionCallback, updateIntervalMs: number): () => void {
+  subscribe = (
+    cb: SubscriptionCallback,
+    updateIntervalMs: number
+  ): (() => void) => {
     const subGroup = this.#subscriptions.get(updateIntervalMs) ?? new Set();
     if (!this.#subscriptions.has(updateIntervalMs)) {
       this.#subscriptions.set(updateIntervalMs, subGroup);
@@ -103,14 +114,14 @@ export class TimeManager {
         this.scheduleNextTick();
       }
     };
-  }
+  };
 
-  cleanup(): void {
+  cleanup = (): void => {
     if (this.#nextTickId !== undefined) {
       window.clearTimeout(this.#nextTickId);
       this.#nextTickId = undefined;
     }
-  }
+  };
 }
 
 const TimeManagerContext = createContext<TimeManager | null>(null);
@@ -147,7 +158,7 @@ export function useTime<TTransform = never>(
     [manager, maxUpdateIntervalMs]
   );
 
-  const time = useSyncExternalStore(subscribe, manager.getCurrentTime);
+  const time = useSyncExternalStore(subscribe, manager.getMostRecentTimeUpdate);
   type Return = ReturnType<typeof useTime<TTransform>>;
 
   if (transform) {
