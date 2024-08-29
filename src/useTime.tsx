@@ -112,12 +112,22 @@ export class TimeManager {
 
 const TimeManagerContext = createContext<TimeManager | null>(null);
 
-type UseTimeConfig<T = unknown> = Readonly<{
+type TransformCallback<TTransform = unknown> = (
+  time: Dayjs
+) => Awaited<TTransform>;
+
+type UseTimeConfig<TTransform = unknown> = Readonly<{
   maxUpdateIntervalMs?: number;
-  transform?: (time: Dayjs) => T;
+  transform?: TransformCallback<TTransform>;
 }>;
 
-export function useTime(config?: UseTimeConfig) {
+type UseTimeReturnValue<TTransform = unknown> = [TTransform] extends [never]
+  ? Dayjs
+  : ReturnType<TransformCallback<TTransform>>;
+
+export function useTime<TTransform = never>(
+  config?: UseTimeConfig<TTransform>
+): UseTimeReturnValue<TTransform> {
   const manager = useContext(TimeManagerContext);
   if (manager === null) {
     throw new Error(
@@ -135,11 +145,13 @@ export function useTime(config?: UseTimeConfig) {
   );
 
   const time = useSyncExternalStore(subscribe, manager.getCurrentTime);
+  type Return = ReturnType<typeof useTime<TTransform>>;
+
   if (transform) {
-    return transform(time);
+    return transform(time) as Return;
   }
 
-  return time;
+  return time as Return;
 }
 
 type Props = Readonly<
