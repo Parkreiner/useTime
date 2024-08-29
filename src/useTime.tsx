@@ -1,6 +1,9 @@
 /**
  * @file Defines a centralized, dependency-injection-friendly, 99% render-safe
  * way of defining time values in a React application.
+ *
+ * @todo Add support for a `paused` property to the hook that shuts down
+ * re-renders.
  */
 import {
   type FC,
