@@ -1,9 +1,6 @@
 /**
  * @file Defines a centralized, dependency-injection-friendly, 99% render-safe
  * way of defining time values in a React application.
- *
- * @todo Add support for a `paused` property to the hook that shuts down
- * re-renders.
  */
 import {
   type FC,
@@ -83,7 +80,8 @@ export class TimeManager {
 
     /**
      * @todo Figure out how to calculate this value especially since the current
-     * class definition doesn't have a way to track
+     * class definition doesn't have a way to track WHEN the most recent timeout
+     * was queued
      */
     this.#nextTickMs = Infinity;
 
