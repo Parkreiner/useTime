@@ -4,18 +4,22 @@
  */
 import {
   type FC,
+  type MutableRefObject,
   type PropsWithChildren,
   type ReactNode,
   createContext,
   useCallback,
   useContext,
   useEffect,
+  useId,
   useLayoutEffect,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
-import dayjs, { Dayjs } from "dayjs";
+import dayjs, { type Dayjs } from "dayjs";
 
+const SSR_HOOK_ID_DATA_ATTRIBUTE = "data-useTimeSync-ssr-hook-id";
 const SSR_INTIAL_RENDER_DATA_ATTRIBUTE = "data-useTimeSync-ssr-initial-value";
 
 // Have explicit type annotation to prevent TypeScript from inferring an opaque
@@ -133,8 +137,19 @@ export class TimeSync {
 
 const TimeSyncContext = createContext<TimeSync | null>(null);
 
+type TimeFormatter = (time: Dayjs) => string;
+
+type ComponentFormatterTracker = MutableRefObject<{
+  processable: boolean;
+  components: Map<string, TimeFormatter | undefined>;
+}>;
+
+const FormatterTrackerContext = createContext<ComponentFormatterTracker | null>(
+  null
+);
+
 type UseTimeConfig = Readonly<{
-  formatter?: (time: Dayjs) => string;
+  formatter?: TimeFormatter;
   targetUpdateIntervalMs?: number;
 }>;
 
@@ -146,13 +161,33 @@ type UseTimeConfig = Readonly<{
 */
 export function useTimeSync(config?: UseTimeConfig): ReactNode {
   const sync = useContext(TimeSyncContext);
-  if (sync === null) {
+  const tracker = useContext(FormatterTrackerContext);
+  if (sync === null || tracker === null) {
     throw new Error(
       `${useTimeSync.name}: hook called in component that is not wrapped inside TimeProvider`
     );
   }
 
   const { formatter, targetUpdateIntervalMs = Infinity } = config ?? {};
+
+  // Abusing useId a little bit. It's meant to be used as a hydration-friendly
+  // way of improving accessibility, but as a side effect of the implementation,
+  // it gives us a stable, opaque value that is uniquely associated with a
+  // component instance.
+  const hookId = useId();
+  useLayoutEffect(() => {
+    if (tracker.current.processable) {
+      tracker.current.components.set(hookId, formatter);
+    }
+
+    /*
+      eslint-disable-next-line react-hooks/exhaustive-deps -- This effect only
+      needs to run on mount because it's only intended to help with hydration.
+      Could've used/made a useEffectEvent polyfill, but that's a lot of runtime
+      overhead for something that's only meant to run on mount, especially in
+      library code.
+    */
+  }, [tracker, hookId]);
 
   // Have to memoize the subscription callback, because useSyncExternalStore
   // will automatically unsubscribe and resubscribe each time it receives a new
@@ -179,6 +214,7 @@ export function useTimeSync(config?: UseTimeConfig): ReactNode {
         {...{
           [SSR_INTIAL_RENDER_DATA_ATTRIBUTE]: true,
           children: SSR_INITIAL_RENDER_OPAQUE_VALUE,
+          [SSR_HOOK_ID_DATA_ATTRIBUTE]: hookId,
         }}
       />
     );
@@ -187,31 +223,66 @@ export function useTimeSync(config?: UseTimeConfig): ReactNode {
   return formatter ? formatter(time) : time.toString();
 }
 
+type SsrPlaceholderSwapperProps = Readonly<
+  PropsWithChildren<{
+    timeSync: TimeSync;
+    registeredCallbacksRef: ComponentFormatterTracker;
+  }>
+>;
+
 // Handles taking each placeholder value generated from an initial server render
 // and swapping them out for a real time value before anything gets painted to
 // the screen. Have to define this as a component because the hook logic needs
 // to be called conditionally based on the value of the TimeProvider's SSR prop
-const SsrPlaceholderSwapper: FC = () => {
-  const contextValue = useContext(TimeSyncContext);
-  if (contextValue === null) {
-    throw new Error("TimeProvider does not have a TimeSync defined");
-  }
-
-  // Capturing the context value after narrowing it in the render logic so that
-  // it can safely be referenced inside the useLayoutEffect callback without any
-  // need for further type narrowing logic
-  const timeSync = contextValue;
+const SsrPlaceholderSwapper: FC<SsrPlaceholderSwapperProps> = ({
+  timeSync,
+  registeredCallbacksRef,
+  children,
+}) => {
+  // React runs all queued effects from the bottom up, so because this component
+  // will always be the parent to all SSR component using the useTime hook, the
+  // layout effects from those hook calls are guaranteed to run first. That
+  // means that our tracker will always be fully populated by the time this
+  // effect runs.
   useLayoutEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
 
-    const placeholderElements = document.querySelector(
+    const ref = registeredCallbacksRef.current;
+    ref.processable = false;
+
+    const placeholderElements = document.querySelectorAll<HTMLSpanElement>(
       `[${SSR_INTIAL_RENDER_DATA_ATTRIBUTE}="true"]`
     );
-  }, [timeSync]);
 
-  return null;
+    const initialTime = timeSync.getValue();
+    const initialString = initialTime.toString();
+
+    for (const el of placeholderElements) {
+      const hookId = el.getAttribute(SSR_HOOK_ID_DATA_ATTRIBUTE);
+      if (hookId === null) {
+        throw new Error("Found SSR placeholder without hook ID");
+      }
+
+      const callback = ref.components.get(hookId);
+      el.innerText = callback ? callback(initialTime) : initialString;
+    }
+
+    /**
+     * @todo Figure out if the cleanup function here also needs to reset the
+     * text for each of the elements that were initially updated with time
+     * values, or if React will automatically wipe all the changes away when it
+     * re-renders. If changing the text makes React break, we also need to
+     * figure out how to make sure that the cleanup function is guaranteed to
+     * run after the initial render only
+     */
+    return () => {
+      ref.processable = true;
+    };
+  }, [timeSync, registeredCallbacksRef]);
+
+  return children;
 };
 
 function defaultCreateTimeSync(initialTime: Dayjs): TimeSync {
@@ -240,10 +311,28 @@ export const TimeSyncProvider: FC<TimeSyncProviderProps> = ({
     return () => readonlySync.cleanup();
   }, [readonlySync]);
 
+  const tracker: ComponentFormatterTracker = useRef(null!);
+  if (tracker.current === null) {
+    tracker.current = {
+      processable: true,
+      components: new Map(),
+    };
+  }
+
   return (
     <TimeSyncContext.Provider value={readonlySync}>
-      {ssr && <SsrPlaceholderSwapper />}
-      {children}
+      <FormatterTrackerContext.Provider value={tracker}>
+        {ssr ? (
+          <SsrPlaceholderSwapper
+            timeSync={readonlySync}
+            registeredCallbacksRef={tracker}
+          >
+            {children}
+          </SsrPlaceholderSwapper>
+        ) : (
+          <>{children}</>
+        )}
+      </FormatterTrackerContext.Provider>
     </TimeSyncContext.Provider>
   );
 };
