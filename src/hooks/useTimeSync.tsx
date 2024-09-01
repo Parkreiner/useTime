@@ -10,7 +10,6 @@ import {
   useCallback,
   useContext,
   useEffect,
-  useId,
   useLayoutEffect,
   useState,
   useSyncExternalStore,
@@ -18,7 +17,6 @@ import {
 import dayjs, { Dayjs } from "dayjs";
 
 const SSR_INTIAL_RENDER_DATA_ATTRIBUTE = "data-useTimeSync-ssr-initial-value";
-const SSR_HOOK_ID_DATA_ATTRIBUTE = "data-hook-id";
 
 // Have explicit type annotation to prevent TypeScript from inferring an opaque
 // value as being something more specific (and making the value not be opaque)
@@ -37,7 +35,6 @@ type TimeSyncInit = Readonly<{
 }>;
 
 type SubscriptionRequest = Readonly<{
-  requestId: string;
   callback: SubscriptionCallback;
   maxUpdateIntervalMs: number;
 }>;
@@ -102,15 +99,12 @@ export class TimeSync {
     this.#nextTickId = this.#setTimeout(this.tick, this.#nextTickMs);
   }
 
-  getValue = (requestId: string, isPaused: boolean): Dayjs => {
+  getValue(): Dayjs {
     return this.#latestTime;
-  };
+  }
 
-  subscribe = ({
-    callback,
-    maxUpdateIntervalMs,
-    requestId,
-  }: SubscriptionRequest): (() => void) => {
+  subscribe(req: SubscriptionRequest): () => void {
+    const { callback, maxUpdateIntervalMs } = req;
     const subGroup = this.#subscriptions.get(maxUpdateIntervalMs) ?? new Set();
     if (!this.#subscriptions.has(maxUpdateIntervalMs)) {
       this.#subscriptions.set(maxUpdateIntervalMs, subGroup);
@@ -127,7 +121,7 @@ export class TimeSync {
         this.scheduleNextTick();
       }
     };
-  };
+  }
 
   cleanup = (): void => {
     if (this.#nextTickId !== undefined) {
@@ -141,8 +135,7 @@ const TimeSyncContext = createContext<TimeSync | null>(null);
 
 type UseTimeConfig = Readonly<{
   formatter?: (time: Dayjs) => string;
-  maxUpdateIntervalMs?: number;
-  paused?: boolean;
+  targetUpdateIntervalMs?: number;
 }>;
 
 /*
@@ -159,43 +152,33 @@ export function useTimeSync(config?: UseTimeConfig): ReactNode {
     );
   }
 
-  const {
-    formatter,
-    paused = false,
-    maxUpdateIntervalMs = Infinity,
-  } = config ?? {};
+  const { formatter, targetUpdateIntervalMs = Infinity } = config ?? {};
 
-  const hookId = useId();
-
+  // Have to memoize the subscription callback, because useSyncExternalStore
+  // will automatically unsubscribe and resubscribe each time it receives a new
+  // memory reference (even if the subscription should stay exactly the same)
   const subscribe = useCallback(
     (notifyReact: () => void) => {
       return sync.subscribe({
-        requestId: hookId,
         callback: notifyReact,
-        maxUpdateIntervalMs,
+        maxUpdateIntervalMs: targetUpdateIntervalMs,
       });
     },
-    [sync, hookId, maxUpdateIntervalMs]
+    [sync, targetUpdateIntervalMs]
   );
 
-  const getClientValue = useCallback(() => {
-    return sync.getValue(hookId, paused);
-  }, [sync, hookId, paused]);
-
-  // String values will only ever be used for server rendering and hydration
-  const time = useSyncExternalStore<Dayjs | string>(
+  const time = useSyncExternalStore<Dayjs | null>(
     subscribe,
-    getClientValue,
-    () => SSR_INITIAL_RENDER_OPAQUE_VALUE
+    () => sync.getValue(),
+    () => null
   );
 
-  if (typeof time === "string") {
+  if (time === null) {
     return (
       <span
         {...{
           [SSR_INTIAL_RENDER_DATA_ATTRIBUTE]: true,
           children: SSR_INITIAL_RENDER_OPAQUE_VALUE,
-          [SSR_HOOK_ID_DATA_ATTRIBUTE]: hookId,
         }}
       />
     );
