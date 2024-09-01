@@ -1,7 +1,7 @@
 import { describe, expect, it, test } from "vitest";
-import { useTime, TimeManager, TimeProvider } from "./useTime";
+import { useTimeSync, TimeSync, TimeSyncProvider } from "./useTimeSync";
 
-describe(TimeManager.name, () => {
+describe(TimeSync.name, () => {
   it("Defines all public functions as arrow functions to ensure that they can't lose their 'this' context", () => {
     expect.hasAssertions();
   });
@@ -41,17 +41,17 @@ describe(TimeManager.name, () => {
   });
 });
 
-describe(TimeProvider.name, () => {
+describe(TimeSyncProvider.name, () => {
   it("Should expose the same TimeManager reference across re-renders", () => {
     expect.hasAssertions();
   });
 
-  it(`Should call ${TimeManager.name}'s \`cleanup\` method on unmount only`, () => {
+  it(`Should call ${TimeSync.name}'s \`cleanup\` method on unmount only`, () => {
     expect.hasAssertions();
   });
 });
 
-describe(useTime.name, () => {
+describe(useTimeSync.name, () => {
   it("Should return the raw time value if no transform callback is provided", () => {
     expect.hasAssertions();
   });
