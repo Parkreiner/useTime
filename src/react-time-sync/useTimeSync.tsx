@@ -18,132 +18,22 @@ import {
   useSyncExternalStore,
 } from "react";
 import dayjs, { type Dayjs } from "dayjs";
+import { TimeSync } from "./TimeSync";
 
-const SSR_HOOK_ID_DATA_ATTRIBUTE = "data-useTimeSync-ssr-hook-id";
-const SSR_INTIAL_RENDER_DATA_ATTRIBUTE = "data-useTimeSync-ssr-initial-value";
+const SSR_PLACEHOLDER_ID_PREFIX = "data-useTimeSync-ssr";
 
 // Have explicit type annotation to prevent TypeScript from inferring an opaque
 // value as being something more specific (and making the value not be opaque)
 const SSR_INITIAL_RENDER_OPAQUE_VALUE: string =
   "<--USE_TIME_SYNC-SSR_INITIAL_RENDER-->";
 
-type IntervalMs = number;
-type SubscriptionCallback = (newTime: Dayjs) => void;
-type SetTimeout = typeof window.setTimeout;
-type ClearTimeout = typeof window.clearTimeout;
-
-type TimeSyncInit = Readonly<{
-  initialTime: Dayjs;
-  setTimeout?: SetTimeout;
-  clearTimeout?: ClearTimeout;
-}>;
-
-type SubscriptionRequest = Readonly<{
-  callback: SubscriptionCallback;
-  maxUpdateIntervalMs: number;
-}>;
-
-export class TimeSync {
-  readonly #subscriptions = new Map<IntervalMs, Set<SubscriptionCallback>>();
-  readonly #setTimeout: SetTimeout;
-  readonly #clearTimeout: ClearTimeout;
-
-  #nextTickId: number | undefined = undefined;
-  #nextTickMs: number | undefined = undefined;
-  #latestTime: Dayjs;
-
-  constructor({
-    initialTime,
-    setTimeout = window.setTimeout,
-    clearTimeout = window.clearTimeout,
-  }: TimeSyncInit) {
-    this.#latestTime = initialTime;
-    this.#setTimeout = setTimeout;
-    this.#clearTimeout = clearTimeout;
-  }
-
-  // Defined as an arrow function so that we don't have to keep binding or
-  // wrapping the tick method inside another arrow function as it gets passed
-  // to setTimeout
-  private tick = (): void => {
-    const newTime = dayjs();
-    this.#latestTime = newTime;
-
-    for (const subGroup of this.#subscriptions.values()) {
-      for (const callback of subGroup) {
-        // Dispatching with a local variable instead of using the mutable
-        // currentTime property to prevent times from changing incorrectly
-        // between invidividual callback resolutions
-        callback(newTime);
-      }
-    }
-  };
-
-  private scheduleNextTick(): void {
-    this.#clearTimeout(this.#nextTickId);
-
-    let earliestPossibleUpdateMs = Infinity;
-    for (const interval of this.#subscriptions.keys()) {
-      if (interval < earliestPossibleUpdateMs) {
-        earliestPossibleUpdateMs = interval;
-      }
-    }
-
-    if (earliestPossibleUpdateMs === Infinity) {
-      return;
-    }
-
-    /**
-     * @todo Figure out how to calculate this value especially since the current
-     * class definition doesn't have a way to track WHEN the most recent timeout
-     * was queued
-     */
-    this.#nextTickMs = Infinity;
-
-    this.#nextTickId = this.#setTimeout(this.tick, this.#nextTickMs);
-  }
-
-  getValue(): Dayjs {
-    return this.#latestTime;
-  }
-
-  subscribe(req: SubscriptionRequest): () => void {
-    const { callback, maxUpdateIntervalMs } = req;
-    const subGroup = this.#subscriptions.get(maxUpdateIntervalMs) ?? new Set();
-    if (!this.#subscriptions.has(maxUpdateIntervalMs)) {
-      this.#subscriptions.set(maxUpdateIntervalMs, subGroup);
-      this.scheduleNextTick();
-    }
-
-    subGroup.add(callback);
-
-    return () => {
-      subGroup?.delete(callback);
-
-      if (subGroup?.size === 0) {
-        this.#subscriptions.delete(maxUpdateIntervalMs);
-        this.scheduleNextTick();
-      }
-    };
-  }
-
-  cleanup = (): void => {
-    if (this.#nextTickId !== undefined) {
-      window.clearTimeout(this.#nextTickId);
-      this.#nextTickId = undefined;
-    }
-  };
-}
-
-const TimeSyncContext = createContext<TimeSync | null>(null);
-
 type TimeFormatter = (time: Dayjs) => string;
-
 type ComponentFormatterTracker = MutableRefObject<{
   processable: boolean;
   components: Map<string, TimeFormatter | undefined>;
 }>;
 
+const TimeSyncContext = createContext<TimeSync | null>(null);
 const FormatterTrackerContext = createContext<ComponentFormatterTracker | null>(
   null
 );
@@ -210,13 +100,9 @@ export function useTimeSync(config?: UseTimeConfig): ReactNode {
 
   if (time === null) {
     return (
-      <span
-        {...{
-          [SSR_INTIAL_RENDER_DATA_ATTRIBUTE]: true,
-          children: SSR_INITIAL_RENDER_OPAQUE_VALUE,
-          [SSR_HOOK_ID_DATA_ATTRIBUTE]: hookId,
-        }}
-      />
+      <span id={`${SSR_PLACEHOLDER_ID_PREFIX}-${hookId}`}>
+        {SSR_INITIAL_RENDER_OPAQUE_VALUE}
+      </span>
     );
   }
 
@@ -226,7 +112,7 @@ export function useTimeSync(config?: UseTimeConfig): ReactNode {
 type SsrPlaceholderSwapperProps = Readonly<
   PropsWithChildren<{
     timeSync: TimeSync;
-    registeredCallbacksRef: ComponentFormatterTracker;
+    tracker: ComponentFormatterTracker;
   }>
 >;
 
@@ -236,7 +122,7 @@ type SsrPlaceholderSwapperProps = Readonly<
 // to be called conditionally based on the value of the TimeProvider's SSR prop
 const SsrPlaceholderSwapper: FC<SsrPlaceholderSwapperProps> = ({
   timeSync,
-  registeredCallbacksRef,
+  tracker,
   children,
 }) => {
   // React runs all queued effects from the bottom up, so because this component
@@ -249,18 +135,25 @@ const SsrPlaceholderSwapper: FC<SsrPlaceholderSwapperProps> = ({
       return;
     }
 
-    const ref = registeredCallbacksRef.current;
+    const ref = tracker.current;
     ref.processable = false;
+    const cleanup = () => {
+      ref.processable = true;
+    };
 
     const placeholderElements = document.querySelectorAll<HTMLSpanElement>(
-      `[${SSR_INTIAL_RENDER_DATA_ATTRIBUTE}="true"]`
+      `[id^="${SSR_PLACEHOLDER_ID_PREFIX}"]`
     );
+
+    if (placeholderElements.length === 0) {
+      return cleanup;
+    }
 
     const initialTime = timeSync.getValue();
     const initialString = initialTime.toString();
 
     for (const el of placeholderElements) {
-      const hookId = el.getAttribute(SSR_HOOK_ID_DATA_ATTRIBUTE);
+      const hookId = el.getAttribute(SSR_PLACEHOLDER_ID_PREFIX);
       if (hookId === null) {
         throw new Error("Found SSR placeholder without hook ID");
       }
@@ -277,10 +170,8 @@ const SsrPlaceholderSwapper: FC<SsrPlaceholderSwapperProps> = ({
      * figure out how to make sure that the cleanup function is guaranteed to
      * run after the initial render only
      */
-    return () => {
-      ref.processable = true;
-    };
-  }, [timeSync, registeredCallbacksRef]);
+    return cleanup;
+  }, [timeSync, tracker]);
 
   return children;
 };
@@ -306,10 +197,10 @@ export const TimeSyncProvider: FC<TimeSyncProviderProps> = ({
   ssr = false,
   children,
 }) => {
-  const [readonlySync] = useState(() => createTimeSync(initialTime));
+  const [timeSync] = useState(() => createTimeSync(initialTime));
   useEffect(() => {
-    return () => readonlySync.cleanup();
-  }, [readonlySync]);
+    return () => timeSync.cleanup();
+  }, [timeSync]);
 
   const tracker: ComponentFormatterTracker = useRef(null!);
   if (tracker.current === null) {
@@ -320,13 +211,10 @@ export const TimeSyncProvider: FC<TimeSyncProviderProps> = ({
   }
 
   return (
-    <TimeSyncContext.Provider value={readonlySync}>
+    <TimeSyncContext.Provider value={timeSync}>
       <FormatterTrackerContext.Provider value={tracker}>
         {ssr ? (
-          <SsrPlaceholderSwapper
-            timeSync={readonlySync}
-            registeredCallbacksRef={tracker}
-          >
+          <SsrPlaceholderSwapper timeSync={timeSync} tracker={tracker}>
             {children}
           </SsrPlaceholderSwapper>
         ) : (
